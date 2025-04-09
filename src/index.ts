@@ -1,13 +1,13 @@
 import express from "express"
 import cors from "cors"
 import dotenv from "dotenv"
-import { executeQuery } from "./src/lib/db"
-import authRoutes from "./src/routes/auth"
-import customerRoutes from "./src/routes/customers"
-import productRoutes from "./src/routes/products"
-import orderRoutes from "./src/routes/orders"
-import orderItemRoutes from "./src/routes/order-items"
-import stripeRoutes from "./src/routes/stripe"
+import { executeQuery } from "./lib/db"
+import authRoutes from "./routes/auth"
+import customerRoutes from "./routes/customers"
+import productRoutes from "./routes/products"
+import orderRoutes from "./routes/orders"
+import orderItemRoutes from "./routes/order-items"
+import stripeRoutes from "./routes/stripe"
 
 // Load environment variables
 dotenv.config()
