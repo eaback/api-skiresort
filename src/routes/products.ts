@@ -1,123 +1,147 @@
-import express from 'express';
-import { db } from '../db';
-import { authMiddleware } from '../middleware/auth';
-import type { Product } from '../db/types';
+import express from "express"
+import { executeQuery, executeInsert } from "../lib/db"
+import type { Product } from "../lib/db-types"
+import { authenticateToken, type AuthenticatedRequest } from "../middleware/auth"
 
-const router = express.Router();
+const router = express.Router()
 
-// Get all products
-router.get('/', async (req, res) => {
+// Get all products or a specific product
+router.get("/", async (req, res) => {
   try {
-    const { category } = req.query;
+    const id = req.query.id as string | undefined
+    const category = req.query.category as string | undefined
 
-    let query = "SELECT * FROM products";
-    let params: any[] = [];
+    let query = "SELECT * FROM products"
+    let params: (string | number)[] = []
+
+    if (id) {
+      query = "SELECT * FROM products WHERE id = ?"
+      params = [id]
+
+      const products = await executeQuery<Product[]>(query, params)
+
+      if (products.length === 0) {
+        return res.status(404).json({ error: "Product not found" })
+      }
+
+      return res.json(products[0])
+    }
 
     if (category) {
-      query = "SELECT * FROM products WHERE category = ?";
-      params = [category];
+      query = "SELECT * FROM products WHERE category = ?"
+      params = [category]
     }
 
-    const products = await db.query<Product[]>(query, params);
-    res.json(products);
+    const products = await executeQuery<Product[]>(query, params)
+    return res.json(products)
   } catch (error) {
-    console.error("Error fetching products:", error);
-    res.status(500).json({ error: "Failed to fetch products" });
+    console.error("Error fetching products:", error)
+    return res.status(500).json({ error: "Failed to fetch products" })
   }
-});
+})
 
-// Get product by ID
-router.get('/:id', async (req, res) => {
+// Create a new product (requires authentication)
+router.post("/", authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
-    const { id } = req.params;
+    const body = req.body
 
-    const products = await db.query<Product[]>("SELECT * FROM products WHERE id = ?", [id]);
-
-    if (products.length === 0) {
-      return res.status(404).json({ error: "Product not found" });
+    if (!body.name || !body.price || !body.category) {
+      return res.status(400).json({ error: "Missing required fields" })
     }
 
-    res.json(products[0]);
+    const query = `
+      INSERT INTO products (name, description, price, stock, category, image)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `
+
+    const params: (string | number)[] = [
+      body.name,
+      body.description || "",
+      body.price,
+      body.stock || 0,
+      body.category,
+      body.image || "",
+    ]
+
+    const result = await executeInsert(query, params)
+
+    const newProduct = await executeQuery<Product[]>("SELECT * FROM products WHERE id = ?", [result.insertId])
+
+    return res.status(201).json(newProduct[0])
   } catch (error) {
-    console.error("Error fetching product:", error);
-    res.status(500).json({ error: "Failed to fetch product" });
+    console.error("Error creating product:", error)
+    return res.status(500).json({ error: "Failed to create product" })
   }
-});
+})
 
-// Create product (protected)
-router.post('/', authMiddleware, async (req, res) => {
+// Update a product (requires authentication)
+router.put("/:id", authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
-    const { name, description, price, stock, category, image } = req.body;
+    const id = req.params.id
 
-    if (!name || !price || !category) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (!id) {
+      return res.status(400).json({ error: "Product ID is required" })
     }
 
-    const result = await db.executeInsert(
-      `INSERT INTO products (name, description, price, stock, category, image)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [name, description || "", price, stock || 0, category, image || ""]
-    );
+    const body = req.body
 
-    const newProduct = await db.query<Product[]>("SELECT * FROM products WHERE id = ?", [result.insertId]);
+    if (!body.name || !body.price || !body.category) {
+      return res.status(400).json({ error: "Missing required fields" })
+    }
 
-    res.status(201).json(newProduct[0]);
+    const query = `
+      UPDATE products
+      SET name = ?, description = ?, price = ?, stock = ?, category = ?, image = ?
+      WHERE id = ?
+    `
+
+    const params: (string | number)[] = [
+      body.name,
+      body.description || "",
+      body.price,
+      body.stock || 0,
+      body.category,
+      body.image || "",
+      id,
+    ]
+
+    await executeQuery<unknown>(query, params)
+
+    const updatedProduct = await executeQuery<Product[]>("SELECT * FROM products WHERE id = ?", [id])
+
+    if (updatedProduct.length === 0) {
+      return res.status(404).json({ error: "Product not found" })
+    }
+
+    return res.json(updatedProduct[0])
   } catch (error) {
-    console.error("Error creating product:", error);
-    res.status(500).json({ error: "Failed to create product" });
+    console.error("Error updating product:", error)
+    return res.status(500).json({ error: "Failed to update product" })
   }
-});
+})
 
-// Update product (protected)
-router.put('/:id', authMiddleware, async (req, res) => {
+// Delete a product (requires authentication)
+router.delete("/:id", authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
-    const { id } = req.params;
-    const { name, description, price, stock, category, image } = req.body;
+    const id = req.params.id
 
-    if (!name || !price || !category) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (!id) {
+      return res.status(400).json({ error: "Product ID is required" })
     }
 
-    const product = await db.query<Product[]>("SELECT * FROM products WHERE id = ?", [id]);
+    const product = await executeQuery<Product[]>("SELECT * FROM products WHERE id = ?", [id])
 
     if (product.length === 0) {
-      return res.status(404).json({ error: "Product not found" });
+      return res.status(404).json({ error: "Product not found" })
     }
 
-    await db.query(
-      `UPDATE products
-       SET name = ?, description = ?, price = ?, stock = ?, category = ?, image = ?
-       WHERE id = ?`,
-      [name, description || "", price, stock || 0, category, image || "", id]
-    );
+    await executeQuery<unknown>("DELETE FROM products WHERE id = ?", [id])
 
-    const updatedProduct = await db.query<Product[]>("SELECT * FROM products WHERE id = ?", [id]);
-
-    res.json(updatedProduct[0]);
+    return res.json({ success: true })
   } catch (error) {
-    console.error("Error updating product:", error);
-    res.status(500).json({ error: "Failed to update product" });
+    console.error("Error deleting product:", error)
+    return res.status(500).json({ error: "Failed to delete product" })
   }
-});
+})
 
-// Delete product (protected)
-router.delete('/:id', authMiddleware, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const product = await db.query<Product[]>("SELECT * FROM products WHERE id = ?", [id]);
-
-    if (product.length === 0) {
-      return res.status(404).json({ error: "Product not found" });
-    }
-
-    await db.query("DELETE FROM products WHERE id = ?", [id]);
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Error deleting product:", error);
-    res.status(500).json({ error: "Failed to delete product" });
-  }
-});
-
-export default router;
+export default router

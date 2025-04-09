@@ -1,242 +1,271 @@
-import express from 'express';
-import { db } from '../db';
-import { authMiddleware } from '../middleware/auth';
-import type { Order, OrderItem } from '../db/types';
+import express from "express"
+import { executeQuery, executeInsert } from "../lib/db"
+import type { Order, OrderItem } from "../lib/db-types"
+import { authenticateToken, type AuthenticatedRequest } from "../middleware/auth"
 
-const router = express.Router();
+const router = express.Router()
 
-// Get all orders (protected)
-router.get('/', authMiddleware, async (req, res) => {
+// Apply authentication middleware to all order routes
+router.use(authenticateToken)
+
+interface ProductStock {
+  id: number
+  stock: number
+}
+
+// Get all orders or a specific order
+router.get("/", async (req: AuthenticatedRequest, res) => {
   try {
-    const orders = await db.query<Order[]>("SELECT * FROM orders ORDER BY created_at DESC");
+    const id = req.query.id as string | undefined
+    const customerId = req.query.customerId as string | undefined
+
+    if (id) {
+      const orders = await executeQuery<Order[]>("SELECT * FROM orders WHERE id = ?", [id])
+
+      if (orders.length === 0) {
+        return res.status(404).json({ error: "Order not found" })
+      }
+
+      const items = await executeQuery<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [id])
+
+      const order = {
+        ...orders[0],
+        items,
+      }
+
+      return res.json(order)
+    }
+
+    if (customerId) {
+      const orders = await executeQuery<Order[]>(
+        "SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC",
+        [customerId],
+      )
+
+      const ordersWithItems = await Promise.all(
+        orders.map(async (order) => {
+          const items = await executeQuery<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [order.id])
+
+          return {
+            ...order,
+            items,
+          }
+        }),
+      )
+
+      return res.json(ordersWithItems)
+    }
+
+    const orders = await executeQuery<Order[]>("SELECT * FROM orders ORDER BY created_at DESC")
 
     const ordersWithItems = await Promise.all(
       orders.map(async (order) => {
-        const items = await db.query<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [order.id]);
+        const items = await executeQuery<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [order.id])
 
         return {
           ...order,
           items,
-        };
-      })
-    );
+        }
+      }),
+    )
 
-    res.json(ordersWithItems);
+    return res.json(ordersWithItems)
   } catch (error) {
-    console.error("Error fetching orders:", error);
-    res.status(500).json({ error: "Failed to fetch orders" });
+    console.error("Error fetching orders:", error)
+    return res.status(500).json({ error: "Failed to fetch orders" })
   }
-});
+})
 
-// Get orders by customer ID (protected)
-router.get('/customer/:customerId', authMiddleware, async (req, res) => {
+interface OrderItemInput {
+  product_id: number
+  product_name: string
+  quantity: number
+  unit_price: number
+}
+
+// Create a new order
+router.post("/", async (req: AuthenticatedRequest, res) => {
   try {
-    const { customerId } = req.params;
+    const body = req.body
+    console.log("Creating order with data:", {
+      customer_id: body.customer_id,
+      items_count: body.items?.length || 0,
+    })
 
-    const orders = await db.query<Order[]>(
-      "SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC",
-      [customerId]
-    );
-
-    const ordersWithItems = await Promise.all(
-      orders.map(async (order) => {
-        const items = await db.query<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [order.id]);
-
-        return {
-          ...order,
-          items,
-        };
-      })
-    );
-
-    res.json(ordersWithItems);
-  } catch (error) {
-    console.error("Error fetching customer orders:", error);
-    res.status(500).json({ error: "Failed to fetch customer orders" });
-  }
-});
-
-// Get order by ID (protected)
-router.get('/:id', authMiddleware, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const orders = await db.query<Order[]>("SELECT * FROM orders WHERE id = ?", [id]);
-
-    if (orders.length === 0) {
-      return res.status(404).json({ error: "Order not found" });
+    if (!body.customer_id || !body.items || !body.items.length) {
+      console.error("Missing required fields for order creation")
+      return res.status(400).json({ error: "Missing required fields" })
     }
 
-    const items = await db.query<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [id]);
-
-    const order = {
-      ...orders[0],
-      items,
-    };
-
-    res.json(order);
-  } catch (error) {
-    console.error("Error fetching order:", error);
-    res.status(500).json({ error: "Failed to fetch order" });
-  }
-});
-
-// Create order
-router.post('/', async (req, res) => {
-  try {
-    const { customer_id, items } = req.body;
-
-    if (!customer_id || !items || !items.length) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    // Check if customer exists
-    const customers = await db.query<any[]>("SELECT id FROM customers WHERE id = ?", [customer_id]);
-    
+    const customers = await executeQuery<{ id: number }[]>("SELECT id FROM customers WHERE id = ?", [body.customer_id])
     if (customers.length === 0) {
-      return res.status(404).json({ error: "Customer not found" });
+      console.error("Customer not found:", body.customer_id)
+      return res.status(404).json({ error: "Customer not found" })
     }
 
-    // Check product stock
-    for (const item of items) {
-      const products = await db.query<any[]>("SELECT id, stock FROM products WHERE id = ?", [item.product_id]);
+    for (const item of body.items as OrderItemInput[]) {
+      const products = await executeQuery<ProductStock[]>("SELECT id, stock FROM products WHERE id = ?", [
+        item.product_id,
+      ])
 
       if (products.length === 0) {
-        return res.status(404).json({ error: `Product with ID ${item.product_id} not found` });
+        console.error("Product not found:", item.product_id)
+        return res.status(404).json({ error: `Product with ID ${item.product_id} not found` })
       }
 
       if (products[0].stock < item.quantity) {
+        console.error("Not enough stock for product:", item.product_id)
         return res.status(400).json({
           error: `Not enough stock for product ${item.product_name}. Available: ${products[0].stock}`,
-        });
+        })
       }
     }
 
-    // Calculate total price
-    const totalPrice = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
+    const totalPrice = (body.items as OrderItemInput[]).reduce(
+      (sum: number, item: OrderItemInput) => sum + item.quantity * item.unit_price,
+      0,
+    )
 
-    // Create order
-    const orderResult = await db.executeInsert(
+    console.log("Creating order with total price:", totalPrice)
+
+    const orderResult = await executeInsert(
       `INSERT INTO orders (customer_id, total_price, payment_status, order_status)
-       VALUES (?, ?, ?, ?)`,
-      [customer_id, totalPrice, "pending", "pending"]
-    );
+      VALUES (?, ?, ?, ?)`,
+      [body.customer_id, totalPrice, "pending", "pending"],
+    )
 
-    const orderId = orderResult.insertId;
+    const orderId = orderResult.insertId
+    console.log("Order created with ID:", orderId)
 
-    // Create order items and update stock
-    for (const item of items) {
-      await db.executeInsert(
+    for (const item of body.items as OrderItemInput[]) {
+      console.log("Adding item to order:", {
+        order_id: orderId,
+        product_id: item.product_id,
+        product_name: item.product_name,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+      })
+
+      await executeInsert(
         `INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price)
-         VALUES (?, ?, ?, ?, ?)`,
-        [orderId, item.product_id, item.product_name, item.quantity, item.unit_price]
-      );
+        VALUES (?, ?, ?, ?, ?)`,
+        [orderId, item.product_id, item.product_name, item.quantity, item.unit_price],
+      )
 
-      await db.query(
-        "UPDATE products SET stock = stock - ? WHERE id = ?",
-        [item.quantity, item.product_id]
-      );
+      await executeQuery<unknown>(`UPDATE products SET stock = stock - ? WHERE id = ?`, [
+        item.quantity,
+        item.product_id,
+      ])
     }
 
-    // Get the created order with items
-    const order = await db.query<Order[]>("SELECT * FROM orders WHERE id = ?", [orderId]);
-    const orderItems = await db.query<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [orderId]);
+    console.log("Order and items created successfully")
 
-    res.status(201).json({
+    const order = await executeQuery<Order[]>("SELECT * FROM orders WHERE id = ?", [orderId])
+    const items = await executeQuery<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [orderId])
+
+    return res.status(201).json({
       ...order[0],
-      items: orderItems,
-    });
+      items,
+    })
   } catch (error) {
-    console.error("Error creating order:", error);
-    res.status(500).json({ error: "Failed to create order" });
+    console.error("Error creating order:", error)
+    return res.status(500).json({
+      error: "Failed to create order: " + (error instanceof Error ? error.message : String(error)),
+    })
   }
-});
+})
 
-// Update order (protected)
-router.put('/:id', authMiddleware, async (req, res) => {
+// Update an order
+router.put("/:id", async (req: AuthenticatedRequest, res) => {
   try {
-    const { id } = req.params;
-    const { payment_status, order_status, payment_id } = req.body;
+    const id = req.params.id
 
-    const order = await db.query<Order[]>("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!id) {
+      return res.status(400).json({ error: "Order ID is required" })
+    }
+
+    const body = req.body
+
+    const order = await executeQuery<Order[]>("SELECT * FROM orders WHERE id = ?", [id])
 
     if (order.length === 0) {
-      return res.status(404).json({ error: "Order not found" });
+      return res.status(404).json({ error: "Order not found" })
     }
 
-    let query = "UPDATE orders SET ";
-    const updates: string[] = [];
-    const params: any[] = [];
+    let query = "UPDATE orders SET "
+    const updates: string[] = []
+    const params: (string | number)[] = []
 
-    if (payment_status) {
-      updates.push("payment_status = ?");
-      params.push(payment_status);
+    if (body.payment_status) {
+      updates.push("payment_status = ?")
+      params.push(body.payment_status)
     }
 
-    if (order_status) {
-      updates.push("order_status = ?");
-      params.push(order_status);
+    if (body.order_status) {
+      updates.push("order_status = ?")
+      params.push(body.order_status)
     }
 
-    if (payment_id) {
-      updates.push("payment_id = ?");
-      params.push(payment_id);
+    if (body.payment_id) {
+      updates.push("payment_id = ?")
+      params.push(body.payment_id)
     }
 
     if (updates.length === 0) {
-      return res.status(400).json({ error: "No fields to update" });
+      return res.status(400).json({ error: "No fields to update" })
     }
 
-    query += updates.join(", ") + " WHERE id = ?";
-    params.push(id);
+    query += updates.join(", ") + " WHERE id = ?"
+    params.push(id)
 
-    await db.query(query, params);
+    await executeQuery<unknown>(query, params)
 
-    const updatedOrder = await db.query<Order[]>("SELECT * FROM orders WHERE id = ?", [id]);
-    const items = await db.query<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [id]);
+    const updatedOrder = await executeQuery<Order[]>("SELECT * FROM orders WHERE id = ?", [id])
+    const items = await executeQuery<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [id])
 
-    res.json({
+    return res.json({
       ...updatedOrder[0],
       items,
-    });
+    })
   } catch (error) {
-    console.error("Error updating order:", error);
-    res.status(500).json({ error: "Failed to update order" });
+    console.error("Error updating order:", error)
+    return res.status(500).json({ error: "Failed to update order" })
   }
-});
+})
 
-// Delete order (protected)
-router.delete('/:id', authMiddleware, async (req, res) => {
+// Delete an order
+router.delete("/:id", async (req: AuthenticatedRequest, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id
 
-    const order = await db.query<Order[]>("SELECT * FROM orders WHERE id = ?", [id]);
+    if (!id) {
+      return res.status(400).json({ error: "Order ID is required" })
+    }
+
+    const order = await executeQuery<Order[]>("SELECT * FROM orders WHERE id = ?", [id])
 
     if (order.length === 0) {
-      return res.status(404).json({ error: "Order not found" });
+      return res.status(404).json({ error: "Order not found" })
     }
 
-    const items = await db.query<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [id]);
+    const items = await executeQuery<OrderItem[]>("SELECT * FROM order_items WHERE order_id = ?", [id])
 
-    // Return stock to products
     for (const item of items) {
-      await db.query(
-        "UPDATE products SET stock = stock + ? WHERE id = ?",
-        [item.quantity, item.product_id]
-      );
+      await executeQuery<unknown>(`UPDATE products SET stock = stock + ? WHERE id = ?`, [
+        item.quantity,
+        item.product_id,
+      ])
     }
 
-    // Delete order items
-    await db.query("DELETE FROM order_items WHERE order_id = ?", [id]);
+    await executeQuery<unknown>("DELETE FROM order_items WHERE order_id = ?", [id])
 
-    // Delete order
-    await db.query("DELETE FROM orders WHERE id = ?", [id]);
+    await executeQuery<unknown>("DELETE FROM orders WHERE id = ?", [id])
 
-    res.json({ success: true });
+    return res.json({ success: true })
   } catch (error) {
-    console.error("Error deleting order:", error);
-    res.status(500).json({ error: "Failed to delete order" });
+    console.error("Error deleting order:", error)
+    return res.status(500).json({ error: "Failed to delete order" })
   }
-});
+})
 
-export default router;
+export default router
