@@ -7,21 +7,27 @@ exports.getConnection = getConnection;
 exports.executeQuery = executeQuery;
 exports.executeInsert = executeInsert;
 const promise_1 = __importDefault(require("mysql2/promise"));
-// Create a connection pool
+const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
 async function getConnection() {
     try {
         console.log("Creating database connection...");
+        const caPath = path_1.default.join(process.cwd(), 'certs', 'ca.pem');
+        const ca = fs_1.default.readFileSync(caPath);
         const pool = promise_1.default.createPool({
             host: process.env.DB_HOST,
+            port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : undefined,
             user: process.env.DB_USER,
             password: process.env.DB_PASSWORD,
             database: process.env.DB_NAME,
             ssl: {
+                ca,
                 rejectUnauthorized: true,
             },
             waitForConnections: true,
             connectionLimit: 10,
             queueLimit: 0,
+            connectTimeout: 60000,
         });
         // Test the connection
         const connection = await pool.getConnection();
